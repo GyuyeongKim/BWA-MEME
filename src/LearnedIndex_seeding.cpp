@@ -64,7 +64,11 @@ uint8_t sa_raux_buf[4][4]= {
 } ;
 #define _get_pac(pac, l) ((pac)[(l)>>2]>>((~(l)&3)<<1)&3)
 
-// set_forward_pivot is now defined in LearnedIndex_seeding.h
+// Used to set pivot point in the read
+inline void set_forward_pivot(Learned_read_aux_t* raux, int pivot){
+	raux->pivot = pivot;
+	raux->l_pivot = raux->l_seq-1 - raux->pivot;
+}
 
 
 bool learned_index_load(char const* dataPath, char const* dataPath2, char const* dataPath3, double suffix_array_num) {
@@ -179,7 +183,7 @@ inline uint64_t learned_index_lookup_3rmi(uint64_t key, size_t* err) { // 3 laye
 	return FCLAMP(fpred, SA_NUM - 1.0);
 }
 
-__attribute__((used)) uint64_t learned_index_lookup(uint64_t key, size_t* err) { //p-rmi
+inline uint64_t learned_index_lookup(uint64_t key, size_t* err) { //p-rmi
 	size_t modelIndex;
 	double fpred;
 	// below is for pwl,linear model
@@ -606,7 +610,7 @@ inline bool compare_read_and_ref_binary_left_pos_only(const uint8_t* pac, const 
 
 
 #if __AVX512BW__
-__attribute__((used)) uint64_t Tokenization( Learned_read_aux_t* raux, bool right_forward, uint32_t* ambiguous_pos, bool hasN){
+inline uint64_t Tokenization( Learned_read_aux_t* raux, bool right_forward, uint32_t* ambiguous_pos, bool hasN){
 	// make key from read
 	// 1. if (read length - pivot) is smaller than 32 (query_k_mer_size)
 	// 2. if (unambiguous base N appears)
@@ -788,7 +792,7 @@ __attribute__((used)) uint64_t Tokenization( Learned_read_aux_t* raux, bool righ
 }
 
 #else
-__attribute__((used)) uint64_t Tokenization( Learned_read_aux_t* raux, bool right_forward, uint32_t* ambiguous_pos, bool hasN){
+inline uint64_t Tokenization( Learned_read_aux_t* raux, bool right_forward, uint32_t* ambiguous_pos, bool hasN){
 	// make key from read
 	// 1. if (read length - pivot) is smaller than 32 (query_k_mer_size)
 	// 2. if (unambiguous base N appears)

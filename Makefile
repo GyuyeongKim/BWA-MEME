@@ -63,7 +63,7 @@ ifeq ($(USE_MIMALLOC), 1)
 endif
 
 OBJS=		src/fastmap.o src/main.o src/utils.o src/memcpy_bwamem.o src/kthread.o \
-			src/kstring.o src/ksw.o src/bwt.o src/ertindex.o src/Learnedindex.o src/bntseq.o src/bwamem.o src/ertseeding.o src/LearnedIndex_seeding.o src/LearnedIndex_batch.o src/profiling.o src/bandedSWA.o \
+			src/kstring.o src/ksw.o src/bwt.o src/ertindex.o src/Learnedindex.o src/bntseq.o src/bwamem.o src/ertseeding.o src/LearnedIndex_seeding.o src/profiling.o src/bandedSWA.o \
 			src/FMI_search.o src/read_index_ele.o src/bwamem_pair.o src/kswv.o src/bwa.o \
 			src/bwamem_extra.o src/bwtbuild.o src/QSufSort.o src/bwt_gen.o src/rope.o src/rle.o src/is.o src/kopen.o src/bwtindex.o src/fast_reader.o
 BWA_LIB=    libbwa.a
