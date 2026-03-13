@@ -285,6 +285,14 @@ inline uint64_t Tokenization( Learned_read_aux_t* raux, bool right_forward, uint
 
 
 /*
+ * Set pivot point in the read
+ */
+inline void set_forward_pivot(Learned_read_aux_t* raux, int pivot){
+	raux->pivot = pivot;
+	raux->l_pivot = raux->l_seq-1 - raux->pivot;
+}
+
+/*
  * Load learned-index parameters
  */
 bool learned_index_load(char const* dataPath, char const* dataPath2,char const* dataPath3, double suffix_array_num);

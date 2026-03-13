@@ -31,6 +31,7 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include "bwamem.h"
 #include "ertseeding.h"
 #include "LearnedIndex_seeding.h"
+#include "LearnedIndex_batch.h"
 #include "FMI_search.h"
 #include "memcpy_bwamem.h"
 #include <iostream>
@@ -1223,10 +1224,7 @@ uint8_t *get_seq(int64_t l_pac, const uint8_t *pac, int64_t beg, int64_t end,
 }
 
 /* End of Functions for testing*/
-inline void set_forward_pivot(Learned_read_aux_t* raux, int pivot){
-	raux->pivot = pivot;
-	raux->l_pivot = raux->l_seq-1 - raux->pivot;
-}
+// set_forward_pivot is now defined in LearnedIndex_seeding.h
 int mem_kernel1_core_Learned(const mem_opt_t *opt,
                          const bntseq_t *bns,
                          const uint8_t *pac,
@@ -1766,7 +1764,7 @@ static void worker_bwt(void *data, long seq_id, long batch_size, int tid)
                              w->hits_ar + (tid * MAX_LINE_LEN), 
                              tid);
     }
-    else if (w->useLearned){
+    else if (w->useLearnedInterleaved || w->useLearned){
         mem_kernel1_core_Learned(w->opt, w->fmi->idx->bns,w->rc_pac,// w->fmi->idx->pac,
         // mem_kernel1_core_Learned_test(w->opt, w->fmi->idx->bns, w->fmi->idx->pac,
                              w->seqs + seq_id,
@@ -1778,7 +1776,7 @@ static void worker_bwt(void *data, long seq_id, long batch_size, int tid)
                              w->ref2sa,
                              w->ref_string,
                              w->l_smems + (tid * MAX_LINE_LEN),
-                             w->hits_ar + (tid * MAX_LINE_LEN), 
+                             w->hits_ar + (tid * MAX_LINE_LEN),
                              tid);
 
     }
@@ -1936,11 +1934,11 @@ void mem_process_seqs(mem_opt_t *opt,
     int n_ = n;
     
     uint64_t tim = __rdtsc();   
-    fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
+    if (bwa_verbose >= 4) fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
     
     kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
 
-    fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
+    if (bwa_verbose >= 4) fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
     
     kt_for(worker_aln, &w, n_); // BSW
     tprof[WORKER10][0] += __rdtsc() - tim;      
@@ -1952,22 +1950,24 @@ void mem_process_seqs(mem_opt_t *opt,
             memcpy_bwamem(pes, 4 * sizeof(mem_pestat_t), pes0, 4 * sizeof(mem_pestat_t), __FILE__, __LINE__); // if pes0 != NULL, set the insert-size
                                                          // distribution as pes0
         else {
-            fprintf(stderr, "[0000] Inferring insert size distribution of PE reads from data, "
-                    "l_pac: %ld, n: %d\n", w.fmi->idx->bns->l_pac, n);
+            if (bwa_verbose >= 4)
+                fprintf(stderr, "[0000] Inferring insert size distribution of PE reads from data, "
+                        "l_pac: %ld, n: %d\n", w.fmi->idx->bns->l_pac, n);
             mem_pestat(opt, w.fmi->idx->bns->l_pac, n, w.regs, pes); // otherwise, infer the insert size
                                                          // distribution from data
         }
     }
     
     tim = __rdtsc();
-    fprintf(stderr, "[0000] 3. Calling kt_for - worker_sam\n");
+    if (bwa_verbose >= 4) fprintf(stderr, "[0000] 3. Calling kt_for - worker_sam\n");
     
     kt_for(worker_sam, &w,  n_);   // SAM   
     tprof[WORKER20][0] += __rdtsc() - tim;
 
-    fprintf(stderr, "\t[0000][ M::%s] Processed %d reads in %.3f "
-            "CPU sec, %.3f real sec\n",
-            __func__, n, cputime() - ctime, realtime() - rtime);
+    if (bwa_verbose >= 4)
+        fprintf(stderr, "\t[0000][ M::%s] Processed %d reads in %.3f "
+                "CPU sec, %.3f real sec\n",
+                __func__, n, cputime() - ctime, realtime() - rtime);
 
 }
 
