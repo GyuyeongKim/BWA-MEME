@@ -69,6 +69,7 @@ typedef struct {
 	uint8_t *ref_string;
 	FMI_search *fmi;
 	fast_reader_t *fast_reader;
+	fast_reader_t *fast_reader2;   /* R2 file for paired-end in -8 mode */
 } ktp_aux_t;
 
 typedef struct {

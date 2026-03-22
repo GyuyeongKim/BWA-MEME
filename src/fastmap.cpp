@@ -743,8 +743,14 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
         int64_t sz = 0;
         ret->use_arena = w.useLearnedInterleaved;
         if (ret->use_arena && aux->fast_reader) {
-            ret->seqs = fast_reader_read_chunk(aux->fast_reader, aux->task_size,
-                                               &ret->n_seqs, &sz, &ret->str_arena);
+            if (aux->fast_reader2) {
+                ret->seqs = fast_reader_read_chunk_pe(aux->fast_reader, aux->fast_reader2,
+                                                      aux->task_size,
+                                                      &ret->n_seqs, &sz, &ret->str_arena);
+            } else {
+                ret->seqs = fast_reader_read_chunk(aux->fast_reader, aux->task_size,
+                                                   &ret->n_seqs, &sz, &ret->str_arena);
+            }
         } else {
             ret->seqs = bseq_read_orig(aux->task_size,
                                        &ret->n_seqs,
@@ -1580,6 +1586,7 @@ int main_mem(int argc, char *argv[])
     // PAIRED_END
     /* Handling Paired-end reads */
     aux.ks2 = 0;
+    aux.fast_reader2 = NULL;
     if (optind + 2 < argc) {
         if (opt->flag & MEM_F_PE) {
             fprintf(stderr, "[W::%s] when '-p' is in use, the second query file is ignored.\n",
@@ -1592,22 +1599,25 @@ int main_mem(int argc, char *argv[])
                 fprintf(stderr, "[E::%s] failed to open file `%s'.\n", __func__, argv[optind + 2]);
                 free(opt);
                 free(ko);
-                err_gzclose(fp);
-                kseq_destroy(aux.ks);
-                if (is_o) 
-                    fclose(aux.fp);             
+                if (!useLearnedInterleaved) {
+                    err_gzclose(fp);
+                    kseq_destroy(aux.ks);
+                }
+                if (is_o)
+                    fclose(aux.fp);
                 delete aux.fmi;
                 kclose(ko);
-                // kclose(ko2);
                 _mm_free(ref_string);
                 return 1;
-            }            
-            // fp2 = gzopen(argv[optind + 2], "r");
-            fp2 = gzdopen(fd2, "r");
-            gzbuffer(fp2, 4 << 20);
-            aux.ks2 = kseq_init(fp2);
+            }
+            if (useLearnedInterleaved) {
+                aux.fast_reader2 = fast_reader_open(fd2, argv[optind + 2]);
+            } else {
+                fp2 = gzdopen(fd2, "r");
+                gzbuffer(fp2, 4 << 20);
+                aux.ks2 = kseq_init(fp2);
+            }
             opt->flag |= MEM_F_PE;
-            assert(aux.ks2 != 0);
         }
     }
 
@@ -1642,7 +1652,10 @@ int main_mem(int argc, char *argv[])
     kclose(ko);
 
     // PAIRED_END
-    if (aux.ks2) {
+    if (aux.fast_reader2) {
+        fast_reader_close(aux.fast_reader2);
+        kclose(ko2);
+    } else if (aux.ks2) {
         kseq_destroy(aux.ks2);
         err_gzclose(fp2); kclose(ko2);
     }

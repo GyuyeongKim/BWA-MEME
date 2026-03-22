@@ -170,12 +170,148 @@ static int fast_reader_fill(fast_reader_t *fr)
     }
 }
 
-/* ── read a chunk of FASTQ records ───────────────────────── */
+/* ── trim /1 or /2 read-number suffix from name (like kseq trim_readno) ── */
+
+static inline void trim_readno_fast(char *name, size_t *len)
+{
+    if (*len > 2 && name[*len - 2] == '/' &&
+        (name[*len - 1] == '1' || name[*len - 1] == '2')) {
+        *len -= 2;
+        name[*len] = '\0';
+    }
+}
+
+/* ── parse one FASTQ record from a fast_reader ───────────── */
+
+static int fast_reader_next(fast_reader_t *fr, bseq1_t *seq, str_arena_t *arena,
+                            uint64_t *t_decomp)
+{
+    char *nl1, *nl2, *nl3, *nl4;
+    char *name_start, *comment_start, *seq_start, *qual_start;
+    char *sep, *tab, *blk, *wp;
+    size_t name_len, comment_len, seq_len, qual_len, line1_len, tot;
+
+    while (1) {
+        /* ensure decode buffer has data */
+        if (fr->decbuf_pos >= fr->decbuf_len) {
+            uint64_t t0 = __rdtsc();
+            if (!fast_reader_fill(fr)) { *t_decomp += __rdtsc() - t0; return 0; }
+            *t_decomp += __rdtsc() - t0;
+        }
+
+        char *buf = fr->decbuf;
+        size_t pos = fr->decbuf_pos;
+        size_t len = fr->decbuf_len;
+
+        char *p = buf + pos;
+        size_t rem = len - pos;
+
+        /* skip whitespace / blank lines before '@' */
+        while (rem > 0 && (*p == '\n' || *p == '\r')) {
+            p++; pos++; rem--;
+        }
+        if (rem == 0) { fr->decbuf_pos = pos; continue; }
+        if (*p != '@') {
+            char *nl = (char *)memchr(p, '\n', rem);
+            if (!nl) { fr->decbuf_pos = len; continue; }
+            fr->decbuf_pos = nl + 1 - buf;
+            continue;
+        }
+
+        /* Line 1: @name [comment]\n */
+        nl1 = (char *)memchr(p, '\n', rem);
+        if (!nl1) { fr->decbuf_pos = pos; goto refill; }
+
+        /* Line 2: sequence\n */
+        nl2 = (char *)memchr(nl1 + 1, '\n', rem - (size_t)(nl1 + 1 - p));
+        if (!nl2) { fr->decbuf_pos = pos; goto refill; }
+
+        /* Line 3: +[...]\n */
+        nl3 = (char *)memchr(nl2 + 1, '\n', rem - (size_t)(nl2 + 1 - p));
+        if (!nl3) { fr->decbuf_pos = pos; goto refill; }
+
+        /* Line 4: quality\n */
+        nl4 = (char *)memchr(nl3 + 1, '\n', rem - (size_t)(nl3 + 1 - p));
+        if (!nl4) {
+            if (fr->eof_dec && nl3 + 1 < buf + len) {
+                nl4 = buf + len;
+            } else {
+                fr->decbuf_pos = pos;
+                goto refill;
+            }
+        }
+
+        /* ── extract fields ── */
+        name_start = p + 1;
+        line1_len = (size_t)(nl1 - name_start);
+
+        sep = (char *)memchr(name_start, ' ', line1_len);
+        tab = (char *)memchr(name_start, '\t', line1_len);
+        if (tab && (!sep || tab < sep)) sep = tab;
+
+        if (sep) {
+            name_len = (size_t)(sep - name_start);
+            comment_start = sep + 1;
+            comment_len = (size_t)(nl1 - comment_start);
+        } else {
+            name_len = line1_len;
+            comment_start = NULL;
+            comment_len = 0;
+        }
+
+        seq_start  = nl1 + 1;
+        seq_len    = (size_t)(nl2 - seq_start);
+        qual_start = nl3 + 1;
+        qual_len   = (size_t)(nl4 - qual_start);
+
+        if (name_len > 0 && name_start[name_len - 1] == '\r') name_len--;
+        if (comment_len > 0 && comment_start[comment_len - 1] == '\r') comment_len--;
+        if (seq_len > 0 && seq_start[seq_len - 1] == '\r') seq_len--;
+        if (qual_len > 0 && qual_start[qual_len - 1] == '\r') qual_len--;
+
+        /* allocate from arena & copy */
+        tot = (name_len + 1) + (seq_len + 1);
+        if (comment_len > 0) tot += comment_len + 1;
+        if (qual_len > 0)    tot += qual_len + 1;
+
+        blk = str_arena_alloc(arena, tot);
+        wp  = blk;
+
+        seq->name = wp;  memcpy(wp, name_start, name_len);  wp[name_len] = '\0';
+        trim_readno_fast(seq->name, &name_len);
+        wp += name_len + 1;
+        if (comment_len > 0) {
+            seq->comment = wp;  memcpy(wp, comment_start, comment_len);  wp[comment_len] = '\0';  wp += comment_len + 1;
+        } else {
+            seq->comment = NULL;
+        }
+        seq->seq = wp;   memcpy(wp, seq_start, seq_len);    wp[seq_len] = '\0';   wp += seq_len + 1;
+        if (qual_len > 0) {
+            seq->qual = wp;  memcpy(wp, qual_start, qual_len);  wp[qual_len] = '\0';
+        } else {
+            seq->qual = NULL;
+        }
+        seq->l_seq = seq_len;
+        seq->sam   = NULL;
+        seq->id    = 0;
+
+        fr->decbuf_pos = (nl4 < buf + len) ? (size_t)(nl4 + 1 - buf) : len;
+        return 1;
+
+    refill:
+        if (fr->eof_dec) return 0;
+        uint64_t t0 = __rdtsc();
+        if (!fast_reader_fill(fr)) { *t_decomp += __rdtsc() - t0; return 0; }
+        *t_decomp += __rdtsc() - t0;
+    }
+}
+
+/* ── read a chunk of FASTQ records (single-end) ─────────── */
 
 bseq1_t *fast_reader_read_chunk(fast_reader_t *fr, int64_t chunk_size, int *n_seqs,
                                  int64_t *total_size, str_arena_t *arena)
 {
-    uint64_t t_decomp = 0, t_parse = 0, t_realloc = 0, t0;
+    uint64_t t_decomp = 0, t_realloc = 0;
 
     int m = chunk_size / 80 + 256;
     bseq1_t *seqs = (bseq1_t *)malloc(m * sizeof(bseq1_t));
@@ -185,149 +321,73 @@ bseq1_t *fast_reader_read_chunk(fast_reader_t *fr, int64_t chunk_size, int *n_se
     int64_t size = 0;
 
     while (size < chunk_size) {
-        /* ensure decode buffer has data */
-        if (fr->decbuf_pos >= fr->decbuf_len) {
-            t0 = __rdtsc();
-            if (!fast_reader_fill(fr)) { t_decomp += __rdtsc() - t0; break; }
-            t_decomp += __rdtsc() - t0;
+        if (n >= m) {
+            uint64_t tr = __rdtsc();
+            m <<= 1;
+            seqs = (bseq1_t *)realloc(seqs, m * sizeof(bseq1_t));
+            t_realloc += __rdtsc() - tr;
         }
-
-        char *buf = fr->decbuf;
-        size_t pos = fr->decbuf_pos;
-        size_t len = fr->decbuf_len;
-        int parsed_any = 0;
-
-        /* ── parse FASTQ records with memchr ── */
-        t0 = __rdtsc();
-        while (pos < len && size < chunk_size) {
-            char *p = buf + pos;
-            size_t rem = len - pos;
-
-            /* skip whitespace / blank lines before '@' */
-            while (rem > 0 && (*p == '\n' || *p == '\r')) {
-                p++; pos++; rem--;
-            }
-            if (rem == 0) break;
-            if (*p != '@') {
-                /* corrupted — skip to next '@' after newline */
-                char *nl = (char *)memchr(p, '\n', rem);
-                if (!nl) { pos = len; break; }
-                pos = nl + 1 - buf;
-                continue;
-            }
-
-            /* Line 1: @name [comment]\n */
-            char *nl1 = (char *)memchr(p, '\n', rem);
-            if (!nl1) break;
-
-            /* Line 2: sequence\n */
-            size_t r2 = rem - (size_t)(nl1 + 1 - p);
-            char *nl2 = (char *)memchr(nl1 + 1, '\n', r2);
-            if (!nl2) break;
-
-            /* Line 3: +[...]\n */
-            size_t r3 = rem - (size_t)(nl2 + 1 - p);
-            char *nl3 = (char *)memchr(nl2 + 1, '\n', r3);
-            if (!nl3) break;
-
-            /* Line 4: quality\n */
-            size_t r4 = rem - (size_t)(nl3 + 1 - p);
-            char *nl4 = (char *)memchr(nl3 + 1, '\n', r4);
-            if (!nl4) {
-                /* last record in file might lack trailing newline */
-                if (fr->eof_dec && nl3 + 1 < buf + len) {
-                    nl4 = buf + len;
-                } else {
-                    break;   /* incomplete record, need more data */
-                }
-            }
-
-            /* ── extract fields ── */
-            char *name_start = p + 1;   /* skip '@' */
-            size_t line1_len = (size_t)(nl1 - name_start);
-
-            /* separate name / comment at first space or tab */
-            char *sep = (char *)memchr(name_start, ' ', line1_len);
-            char *tab = (char *)memchr(name_start, '\t', line1_len);
-            if (tab && (!sep || tab < sep)) sep = tab;
-
-            size_t name_len, comment_len;
-            char *comment_start;
-            if (sep) {
-                name_len = (size_t)(sep - name_start);
-                comment_start = sep + 1;
-                comment_len = (size_t)(nl1 - comment_start);
-            } else {
-                name_len = line1_len;
-                comment_start = NULL;
-                comment_len = 0;
-            }
-
-            char *seq_start  = nl1 + 1;
-            size_t seq_len   = (size_t)(nl2 - seq_start);
-            char *qual_start = nl3 + 1;
-            size_t qual_len  = (size_t)(nl4 - qual_start);
-
-            /* strip \r */
-            if (name_len > 0 && name_start[name_len - 1] == '\r') name_len--;
-            if (comment_len > 0 && comment_start[comment_len - 1] == '\r') comment_len--;
-            if (seq_len > 0 && seq_start[seq_len - 1] == '\r') seq_len--;
-            if (qual_len > 0 && qual_start[qual_len - 1] == '\r') qual_len--;
-
-            /* grow seqs array if needed */
-            if (n >= m) {
-                uint64_t tr = __rdtsc();
-                m <<= 1;
-                seqs = (bseq1_t *)realloc(seqs, m * sizeof(bseq1_t));
-                t_realloc += __rdtsc() - tr;
-            }
-
-            /* allocate from arena & copy */
-            size_t tot = (name_len + 1) + (seq_len + 1);
-            if (comment_len > 0) tot += comment_len + 1;
-            if (qual_len > 0)    tot += qual_len + 1;
-
-            char *blk = str_arena_alloc(arena, tot);
-            char *wp  = blk;
-
-            bseq1_t *s = &seqs[n];
-            s->name = wp;  memcpy(wp, name_start, name_len);  wp[name_len] = '\0';  wp += name_len + 1;
-            if (comment_len > 0) {
-                s->comment = wp;  memcpy(wp, comment_start, comment_len);  wp[comment_len] = '\0';  wp += comment_len + 1;
-            } else {
-                s->comment = NULL;
-            }
-            s->seq = wp;   memcpy(wp, seq_start, seq_len);    wp[seq_len] = '\0';   wp += seq_len + 1;
-            if (qual_len > 0) {
-                s->qual = wp;  memcpy(wp, qual_start, qual_len);  wp[qual_len] = '\0';
-            } else {
-                s->qual = NULL;
-            }
-            s->l_seq = seq_len;
-            s->sam   = NULL;
-            s->id    = 0;
-
-            size += seq_len;
-            pos = (nl4 < buf + len) ? (size_t)(nl4 + 1 - buf) : len;
-            n++;
-            parsed_any = 1;
-        }
-        t_parse += __rdtsc() - t0;
-
-        fr->decbuf_pos = pos;
-
-        if (!parsed_any) {
-            if (fr->eof_dec) break;
-            /* partial record at end of buffer — force fill more data */
-            t0 = __rdtsc();
-            if (!fast_reader_fill(fr)) { t_decomp += __rdtsc() - t0; break; }
-            t_decomp += __rdtsc() - t0;
-            continue;
-        }
+        if (!fast_reader_next(fr, &seqs[n], arena, &t_decomp)) break;
+        seqs[n].id = n;
+        size += seqs[n].l_seq;
+        n++;
     }
 
     tprof[READ_IO_KSEQ][0] += t_decomp;
-    tprof[READ_IO_COPY][0] += t_parse;
+    tprof[READ_IO_REALLOC][0] += t_realloc;
+
+    if (n == 0) {
+        free(seqs);
+        *n_seqs = 0;
+        *total_size = 0;
+        return NULL;
+    }
+
+    *n_seqs = n;
+    *total_size = size;
+    return seqs;
+}
+
+/* ── read a chunk of FASTQ records (paired-end, interleaved) ── */
+
+bseq1_t *fast_reader_read_chunk_pe(fast_reader_t *fr, fast_reader_t *fr2,
+                                    int64_t chunk_size, int *n_seqs,
+                                    int64_t *total_size, str_arena_t *arena)
+{
+    uint64_t t_decomp = 0, t_realloc = 0;
+
+    int m = chunk_size / 80 + 256;
+    bseq1_t *seqs = (bseq1_t *)malloc(m * sizeof(bseq1_t));
+    str_arena_init(arena);
+
+    int n = 0;
+    int64_t size = 0;
+
+    while (size < chunk_size) {
+        /* ensure space for 2 records */
+        if (n + 1 >= m) {
+            uint64_t tr = __rdtsc();
+            m <<= 1;
+            seqs = (bseq1_t *)realloc(seqs, m * sizeof(bseq1_t));
+            t_realloc += __rdtsc() - tr;
+        }
+        /* read R1 */
+        if (!fast_reader_next(fr, &seqs[n], arena, &t_decomp)) break;
+        seqs[n].id = n;
+        size += seqs[n].l_seq;
+        n++;
+
+        /* read R2 */
+        if (!fast_reader_next(fr2, &seqs[n], arena, &t_decomp)) {
+            fprintf(stderr, "[W::%s] the 2nd file has fewer sequences.\n", __func__);
+            break;
+        }
+        seqs[n].id = n;
+        size += seqs[n].l_seq;
+        n++;
+    }
+
+    tprof[READ_IO_KSEQ][0] += t_decomp;
     tprof[READ_IO_REALLOC][0] += t_realloc;
 
     if (n == 0) {
